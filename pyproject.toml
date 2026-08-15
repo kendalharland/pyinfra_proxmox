@@ -1,0 +1,16 @@
+
+[project]
+name = "pyinfra-proxmox"
+version = "0.1.0"
+dependencies = [
+    "pyinfra==3.10.0",
+    "proxmoxer==2.0.0",
+    "requests==2.34.2", # For proxmoxer
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.entry-points."pyinfra.connectors"]
+proxmox = "pyinfra_proxmox.connector:ProxmoxConnector"
