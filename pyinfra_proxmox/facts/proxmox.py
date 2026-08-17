@@ -1,15 +1,21 @@
-
 from typing_extensions import override
 from pyinfra.api import FactBase
-from pyinfra_proxmox.inventory import ProxmoxEntity, list_proxmox_entities, ProxmoxApiSettings
+from pyinfra_proxmox.inventory import (
+    ProxmoxEntity,
+    list_proxmox_entities,
+    ProxmoxApiSettings,
+)
+
 
 class IsApiHost(FactBase):
     """Returns true iff the given host is a Proxmox instance."""
+
     command = "test -d /etc/pve && echo 1 || echo 0"
 
     @override
     def process(self, result) -> bool:
         return result and result == ["1"]
+
 
 class Entities(FactBase):
     requires_facts = ("IsHost",)

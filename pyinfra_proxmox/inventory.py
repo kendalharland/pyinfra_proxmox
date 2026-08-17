@@ -3,7 +3,8 @@ from typing import NamedTuple, override
 from proxmoxer import ProxmoxAPI
 from enum import Enum
 
-from .errors import ProxmoxError
+from .errors import InvalidInputError, ProxmoxError
+
 
 class ProxmoxApiSettings(NamedTuple):
     hostname: str
@@ -15,11 +16,15 @@ class ProxmoxApiSettings(NamedTuple):
     @staticmethod
     def from_host_data(host_data: dict):
         return ProxmoxApiSettings(
-            hostname = host_data.get("proxmox_hostname", host_data.get("ssh_hostname", "")),
-            username = host_data.get("proxmox_user", host_data.get("ssh_user", "root")),
-            password = host_data.get("proxmox_pass",  host_data.get("ssh_pass", "password")),
-            realm = host_data.get("proxmox_auth_realm", "pam"),
-            default_node = host_data.get("proxmox_default_node", None),
+            hostname=host_data.get(
+                "proxmox_hostname", host_data.get("ssh_hostname", "")
+            ),
+            username=host_data.get("proxmox_user", host_data.get("ssh_user", "root")),
+            password=host_data.get(
+                "proxmox_pass", host_data.get("ssh_pass", "password")
+            ),
+            realm=host_data.get("proxmox_auth_realm", "pam"),
+            default_node=host_data.get("proxmox_default_node", None),
         )
 
     def api(self) -> ProxmoxAPI:
@@ -27,60 +32,69 @@ class ProxmoxApiSettings(NamedTuple):
             raise ProxmoxError("no hostname is configured")
         return ProxmoxAPI(
             self.hostname,
-            user=f'{self.username}@{self.realm}',
+            user=f"{self.username}@{self.realm}",
             password=self.password,
-            verify_ssl=False
+            verify_ssl=False,
         )
 
     def host_data(self) -> dict:
         return {
             "ssh_hostname": self.hostname,
             "ssh_user": self.username,
-            "ssh_pass": self.password
+            "ssh_pass": self.password,
         }
 
 
 class EntityKind(Enum):
     LXC = "lxc"
     QEMU = "qemu"
-    HOST = "node"
+    NODE = "node"
 
     def __str__(self) -> str:
         return self.value
+
 
 class Selector:
     @staticmethod
     def parse(value: str):
         return parse_selector(value)
 
+
 @dataclass
 class FullyQualifiedSelector(Selector):
     """@proxmox/$node/$kind/$vmid
     Targets an entity on a specific cluster node.
     """
+
     node: str
     kind: EntityKind
     vmid: int
+
 
 @dataclass
 class GuestSelector(Selector):
     """@proxmox/$kind/$vmid
     Targets an entity from the default node or a standalone cluster node.
     """
+
     kind: EntityKind
     vmid: str
+
 
 @dataclass
 class NodeSelector(Selector):
     """@proxmox/$node
     Targets a specific node in a cluster.
     """
+
     node: str
+
 
 class InventoryTarget(NamedTuple):
     name: str
     data: dict
     groups: list[str] = []
+
 
 class NodeEntity(NamedTuple):
     node: str
@@ -100,7 +114,7 @@ class NodeEntity(NamedTuple):
 
     @property
     def kind(self) -> EntityKind:
-        return EntityKind.HOST
+        return EntityKind.NODE
 
     @property
     def is_running(self) -> bool:
@@ -108,7 +122,8 @@ class NodeEntity(NamedTuple):
 
     def matches(self, selector: Selector):
         return isinstance(selector, NodeSelector) and selector.node == self.node
-    
+
+
 class LxcEntity(NamedTuple):
     node: str
     vmid: int
@@ -128,7 +143,6 @@ class LxcEntity(NamedTuple):
     diskwrite: int
     type: str
     swap: int
-
     pid: int = 0
     tags: str = ""
     pressurememoryfull: float = 0
@@ -148,11 +162,12 @@ class LxcEntity(NamedTuple):
 
     def matches(self, selector: Selector):
         return (
-            isinstance(selector, FullyQualifiedSelector) and
-            selector.node == self.node and
-            selector.kind == self.kind and
-            selector.vmid == self.vmid
+            isinstance(selector, FullyQualifiedSelector)
+            and selector.node == self.node
+            and selector.kind == self.kind
+            and selector.vmid == self.vmid
         )
+
 
 class QemuEntity(NamedTuple):
     node: str
@@ -182,7 +197,6 @@ class QemuEntity(NamedTuple):
     pressurecpusome: float = 0
     pressurecpufull: float = 0
 
-
     @property
     def kind(self) -> EntityKind:
         return EntityKind.QEMU
@@ -194,13 +208,15 @@ class QemuEntity(NamedTuple):
     @override
     def matches(self, selector: Selector):
         return (
-            isinstance(selector, FullyQualifiedSelector) and
-            selector.node == self.node and
-            selector.kind == self.kind and
-            selector.vmid == self.vmid
+            isinstance(selector, FullyQualifiedSelector)
+            and selector.node == self.node
+            and selector.kind == self.kind
+            and selector.vmid == self.vmid
         )
 
+
 ProxmoxEntity = QemuEntity | LxcEntity | NodeEntity
+
 
 def discover_proxmox_inventory(settings: ProxmoxApiSettings):
     """
@@ -210,148 +226,175 @@ def discover_proxmox_inventory(settings: ProxmoxApiSettings):
     # Include the host as part of the inventory
 
     api = settings.api()
-    api_host_data = settings.host_data()
-
     for entity in list_proxmox_entities(api):
         if not entity.is_running:
             continue
-
-        if entity.kind == EntityKind.HOST:
-            yield node_inventory_item(entity, api_host_data)
-        elif entity.kind == EntityKind.QEMU:
-            # Prefer a direct connection to QEMU VMs because it is more reliable then
-            # executing `qm entity exec` over an SSH connection to the proxmox VE shell
-            # due to many layers of shell escaping.
-            host_data = {
-                "ssh_hostname": get_vm_ip(api, entity.node, entity.vmid),
-                "ssh_user": get_vm_user(api, entity.node, entity.vmid),
-                # TODO: Support a VM-specific password here
-                "ssh_pass": api_host_data["ssh_pass"],
-            }
-            yield qemu_inventory_item(entity, host_data)
-            
-        else:
-            assert entity.kind == EntityKind.LXC
-            yield lxc_inventory_item(entity, api_host_data)
-
+        yield from generate_inventory_item(settings, entity)
     return
 
-    # Select a single entity LXC container.
-    # if name.startswith(ProxmoxConnector.NAME_PREFIX_LXC):
-    #     vmid = int(name.removeprefix(ProxmoxConnector.NAME_PREFIX_LXC))
-    #     entity = next(entity for entity in guests if entity.vmid == vmid)
-    #     yield tuple(_lxc_inventory_target(entity))
-    #     return
 
-    # # Select a single entity QEMU VM.
-    # if name.startswith(ProxmoxConnector.NAME_PREFIX_VM):
-    #     vmid = int(name.removeprefix(ProxmoxConnector.NAME_PREFIX_VM))
-    #     entity = next(entity for entity in guests if entity.vmid == vmid)
-    #     yield tuple(_qemu_inventory_target(entity))
-    #     return
+def parse_entity_kind(value: str) -> tuple[EntityKind, bool]:
+    if value == EntityKind.LXC.value:
+        return EntityKind.LXC
+    if value == EntityKind.QEMU.value:
+        return EntityKind.QEMU
+    if value == EntityKind.NODE.value:
+        return EntityKind.NODE
+    raise InvalidInputError("entity kind", value)
 
-    # raise ValueError(f"Unknown Proxmox target: {name}")
-
-
-def parse_target_type(value: str) -> EntityKind:
-    if value == EntityKind.LXC.value: return EntityKind.LXC
-    if value == EntityKind.QEMU.value: return EntityKind.QEMU
-    if value == EntityKind.HOST.value: return EntityKind.HOST
-    raise ProxmoxError(f"invalid target type: {value}")
 
 def parse_vmid(value: str) -> int:
     if not value.isdigit():
-        raise ProxmoxError(f"invalid vmid: {value}")
+        raise InvalidInputError("vmid", value)
     return int(value)
-    
+
+
 def parse_selector(name: str) -> Selector:
     if name.count("/") > 2:
-        raise ProxmoxError(f"invalid proxmox entity name: {name}")
+        raise InvalidInputError("selector", name)
 
     parts = name.split("/", maxsplit=2)
 
-    if len(parts) == 1: # node
-        return NodeSelector(node = parts[0])
+    if len(parts) == 1:  # node
+        return NodeSelector(node=parts[0])
 
-    if len(parts) == 2: # kind/vmid
-        kind = parse_target_type(parts[0])
+    if len(parts) == 2:  # kind/vmid
+        kind = parse_entity_kind(parts[0])
         vmid = parse_vmid(parts[1])
-        return GuestSelector(kind = kind, vmid = vmid)
+        return GuestSelector(kind=kind, vmid=vmid)
 
-    if len(parts) == 3: # node/kind/vmid
+    if len(parts) == 3:  # node/kind/vmid
         node = parts[0]
-        kind = parse_target_type(parts[1])
+        kind = parse_entity_kind(parts[1])
         vmid = parse_vmid(parts[2])
-        return FullyQualifiedSelector(node = node, kind = kind, vmid = vmid)
+        return FullyQualifiedSelector(node=node, kind=kind, vmid=vmid)
 
-    raise ProxmoxError(f"invalid proxmox entity name: {name}")
+    raise InvalidInputError("selector", name)
 
-# TODO: Group by entity kind.
+
+def generate_inventory_item(settings: ProxmoxApiSettings, entity: ProxmoxEntity):
+    api = settings.api()
+    api_host_data = settings.host_data()
+
+    if entity.kind == EntityKind.LXC:
+        yield lxc_inventory_item(
+            entity,
+            {
+                "ssh_hostname": get_lxc_ip(api, entity.node, entity.vmid),
+                # The Proxmox API doesn't support fetching the current logged in
+                # container user. Assume the user is the same as the promox VE
+                # shell user.
+                "ssh_user": api_host_data["ssh_user"],
+                "ssh_pass": api_host_data["ssh_pass"],
+            },
+        )
+    elif entity.kind == EntityKind.QEMU:
+        yield qemu_inventory_item(
+            entity,
+            {
+                "ssh_hostname": get_vm_ip(api, entity.node, entity.vmid),
+                "ssh_user": get_vm_user(api, entity.node, entity.vmid),
+                # Since this connector has to discover the inventory itself,
+                # assume the current QEMU VM user has the same password as
+                # the Promxmox API host user.
+                "ssh_pass": api_host_data["ssh_pass"],
+            },
+        )
+    else:
+        assert entity.kind == EntityKind.NODE
+        yield node_inventory_item(entity, api_host_data)
+
 
 def node_inventory_item(entity: NodeEntity, host_data: dict) -> InventoryTarget:
-    return tuple(InventoryTarget(
-        name = entity.node,
-        data = {
-            **host_data,
-            "kind": EntityKind.HOST,
-        },
-    ))
+    return tuple(
+        InventoryTarget(
+            name=entity.node,
+            data={
+                **host_data,
+                "kind": EntityKind.NODE,
+            },
+        )
+    )
+
 
 def lxc_inventory_item(entity: LxcEntity, host_data: dict) -> InventoryTarget:
     target_name = f"{entity.node}/{entity.kind}/{entity.vmid}"
-    return tuple(InventoryTarget(
-        name = target_name,
-        data = {
-            **host_data,
-            "kind": entity.kind,
-            "vmid": entity.vmid,
-        }
-    ))
+    return tuple(
+        InventoryTarget(
+            name=target_name,
+            data={
+                **host_data,
+                "kind": entity.kind,
+                "vmid": entity.vmid,
+            },
+        )
+    )
+
 
 def qemu_inventory_item(entity: QemuEntity, host_data: dict) -> InventoryTarget:
     target_name = f"{entity.node}/{entity.kind}/{entity.vmid}"
-    return tuple(InventoryTarget(
-        name = target_name,
-        data = {
-            **host_data,
-            "kind": entity.kind,
-            "vmid": entity.vmid,
-        },
-    ))
+    return tuple(
+        InventoryTarget(
+            name=target_name,
+            data={
+                **host_data,
+                "kind": entity.kind,
+                "vmid": entity.vmid,
+            },
+        )
+    )
+
 
 def list_proxmox_entities(api: ProxmoxAPI) -> ProxmoxEntity:
-    entities: list [ProxmoxEntity] = []
+    entities: list[ProxmoxEntity] = []
 
     for node in api.nodes.get():
         entities.append(NodeEntity(**node))
 
-        entities.extend([
-            LxcEntity(node=node["node"], **entity)
-            for entity in api.nodes(node["node"]).lxc.get()
-        ])
+        entities.extend(
+            [
+                LxcEntity(node=node["node"], **entity)
+                for entity in api.nodes(node["node"]).lxc.get()
+            ]
+        )
 
-        entities.extend([
-            QemuEntity(node=node["node"], **entity)
-            for entity in api.nodes(node["node"]).qemu.get()
-        ])
+        entities.extend(
+            [
+                QemuEntity(node=node["node"], **entity)
+                for entity in api.nodes(node["node"]).qemu.get()
+            ]
+        )
 
     return entities
 
-def get_vm_ip(api, node, vmid):
-    result = api.nodes(node).qemu(vmid).agent.get('network-get-interfaces')
 
-    for iface in result['result']:
-        if iface['name'] == 'lo':
+def get_vm_ip(api, node, vmid):
+    result = api.nodes(node).qemu(vmid).agent.get("network-get-interfaces")
+
+    for iface in result["result"]:
+        if iface["name"] == "lo":
             continue  # skip loopback
-        for addr in iface.get('ip-addresses', []):
-            if addr['ip-address-type'] == 'ipv4':
-                return addr['ip-address']
+        for addr in iface.get("ip-addresses", []):
+            if addr["ip-address-type"] == "ipv4":
+                return addr["ip-address"]
     return None
 
-def get_vm_user(api, node, vmid):
-    result = api.nodes(node).qemu(vmid).agent.post('exec', command='who')
-    pid = result['pid']
-    status = api.nodes(node).qemu(vmid).agent('exec-status').get(pid=pid)
+
+def get_lxc_ip(api, node, vmid):
+    interfaces = api.nodes(node).lxc(vmid).interfaces.get()
+    for iface in interfaces:
+        if iface["name"] == "lo":
+            continue  # skip loopback
+        for addr in iface.get("ip-addresses", []):
+            if addr["ip-address-type"] in ["ipv4", "inet"]:
+                return addr["ip-address"]
+    return None
+
+
+def get_lxc_user(api, node, vmid):
+    result = api.nodes(node).lxc(vmid).agent.post("exec", command="who")
+    pid = result["pid"]
+    status = api.nodes(node).qemu(vmid).agent("exec-status").get(pid=pid)
     err_data = status.get("err-data", None)
     if err_data:
         raise ProxmoxError(f"failed to fetch vm user: {err_data}")
@@ -359,10 +402,22 @@ def get_vm_user(api, node, vmid):
     user = status.get("out-data").split(maxsplit=1)[0]
     return user
 
+
+def get_vm_user(api, node, vmid):
+    result = api.nodes(node).qemu(vmid).agent.post("exec", command="who")
+    pid = result["pid"]
+    status = api.nodes(node).qemu(vmid).agent("exec-status").get(pid=pid)
+    err_data = status.get("err-data", None)
+    if err_data:
+        raise ProxmoxError(f"failed to fetch vm user: {err_data}")
+
+    user = status.get("out-data").split(maxsplit=1)[0]
+    return user
+
+
 def get_standalone_node(api) -> NodeEntity:
     nodes = api.nodes.get()
     if len(nodes) > 1:
         names = [node["node"] for node in nodes]
         raise ProxmoxError(f"expected a single node but found {names}")
     return nodes[0]
-

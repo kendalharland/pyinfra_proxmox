@@ -1,1 +1,0 @@
-from .inventory import discover_proxmox_inventory 
